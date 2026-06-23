@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=0.60">
     <title>CobrançaZap - Gerenciador de Cobranças via WhatsApp</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
-    <link href="https://cdn.jsdelivr.net/npm/lucide@0.462.0/dist/umd/lucide.js" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/lucide@0.462.0/dist/umd/lucide.js"></script>
     <style>
         * {
@@ -801,7 +800,6 @@
         // topo da página) e ficam guardadas no localStorage deste navegador/dispositivo.
         // Você pode cadastrar vários bancos (um por cliente/empresa, por exemplo) e
         // trocar entre eles quando quiser, sem precisar editar o arquivo.
-        let db = null;
         let firebaseReady = false;
 
         function loadSavedDatabases() {
@@ -822,6 +820,12 @@
             return loadSavedDatabases().find(d => d.id === activeId) || null;
         }
         // ========================================================================
+
+        function getDbPath(path) {
+            var cfg = getActiveDatabaseConfig();
+            var storeId = (cfg && cfg.storeId) ? cfg.storeId : 'default';
+            return 'cobrancazap/' + storeId + '/' + path;
+        }
 
         // Global variables
         let clients = [];
@@ -871,7 +875,7 @@
                 
                 // Propaga o reset para a nuvem também, para refletir em todos os dispositivos
                 if (firebaseReady) {
-                    db.ref('clients').set(resetClients);
+                    if (firebaseReady) fbSet(_fbPath + '/clients', resetClients);
                 }
                 
                 return resetClients;
@@ -966,119 +970,212 @@
             lucide.createIcons();
         }
 
+        // ===================== FIREBASE REST API (sem SDK, sem apiKey) =====================
+        // Usa a REST API do Realtime Database + SSE para sincronização em tempo real.
+        // Funciona com regras abertas (modo teste) sem precisar de apiKey.
+
+        var _sseClients = null;
+        var _sseLogs = null;
+        var _sseSettings = null;
+        var _sseConnected = null;
+        var _fbUrl = null;   // base URL do banco ativo
+        var _fbPath = null;  // cobrancazap/{storeId}
+
+        function fbGet(path) {
+            return fetch(_fbUrl + '/' + path + '.json')
+                .then(function(r) { return r.json(); });
+        }
+
+        function fbSet(path, data) {
+            return fetch(_fbUrl + '/' + path + '.json', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            }).then(function(r) { return r.json(); });
+        }
+
+        function fbRemove(path) {
+            return fetch(_fbUrl + '/' + path + '.json', { method: 'DELETE' });
+        }
+
+        function _closeSSE() {
+            [_sseClients, _sseLogs, _sseSettings, _sseConnected].forEach(function(es) {
+                if (es) { try { es.close(); } catch(e) {} }
+            });
+            _sseClients = _sseLogs = _sseSettings = _sseConnected = null;
+        }
+
+        function _sseOn(subPath, callback, errorCallback) {
+            var url = _fbUrl + '/' + _fbPath + '/' + subPath + '.json';
+            var es = new EventSource(url);
+            es.addEventListener('put', function(e) {
+                try {
+                    var msg = JSON.parse(e.data);
+                    callback(msg.data);
+                } catch(err) { console.error('SSE parse error', err); }
+            });
+            es.onerror = function(err) {
+                updateSyncStatusUI('offline');
+                if (errorCallback) errorCallback(err);
+            };
+            return es;
+        }
+
         // Conecta ao Firebase ativo e mantém tudo sincronizado em tempo real
         async function reconnectFirebase() {
-            // Desliga os listeners do banco anterior, se houver algum conectado
-            if (db) {
-                try {
-                    db.ref('clients').off();
-                    db.ref('logs').off();
-                    db.ref('settings/autoSendEnabled').off();
-                    db.ref('.info/connected').off();
-                } catch (error) {
-                    console.error('Erro ao desconectar listeners antigos:', error);
-                }
-            }
-
-            // Remove a instância de app anterior do Firebase antes de criar outra
-            if (typeof firebase !== 'undefined' && firebase.apps && firebase.apps.length) {
-                try {
-                    await firebase.app().delete();
-                } catch (error) {
-                    console.error('Erro ao remover instância anterior do Firebase:', error);
-                }
-            }
-
+            _closeSSE();
             db = null;
             firebaseReady = false;
 
-            const activeConfig = getActiveDatabaseConfig();
-
-            if (!activeConfig) {
+            var activeConfig = getActiveDatabaseConfig();
+            if (!activeConfig || !activeConfig.databaseURL) {
                 updateSyncStatusUI('not-configured');
                 return;
             }
 
+            _fbUrl = activeConfig.databaseURL.replace(/\/+$/, '');
+            var storeId = (activeConfig.storeId) ? activeConfig.storeId : 'default';
+            _fbPath = 'cobrancazap/' + storeId;
+
+            updateSyncStatusUI('connecting');
+
+            // Testa conectividade lendo o nó raiz
             try {
-                firebase.initializeApp({
-                    apiKey: activeConfig.apiKey,
-                    authDomain: activeConfig.authDomain,
-                    databaseURL: activeConfig.databaseURL,
-                    projectId: activeConfig.projectId,
-                    storageBucket: activeConfig.storageBucket,
-                    messagingSenderId: activeConfig.messagingSenderId,
-                    appId: activeConfig.appId
-                });
-                db = firebase.database();
+                await fbGet(_fbPath + '/ping');
                 firebaseReady = true;
+                updateSyncStatusUI('online');
                 attachCloudListeners();
             } catch (error) {
                 console.error('Erro ao conectar ao Firebase:', error);
-                db = null;
                 firebaseReady = false;
                 updateSyncStatusUI('offline');
-                addLog(`Erro ao conectar ao banco "${activeConfig.name}": ${error.message}`, 'error');
+                addLog('Erro ao conectar ao banco "' + activeConfig.name + '": ' + error.message, 'error');
             }
         }
 
-        // Liga os listeners em tempo real do banco atualmente conectado
+        // Liga os listeners SSE do banco atualmente conectado
         function attachCloudListeners() {
-            updateSyncStatusUI('connecting');
-
-            // Monitora o status real da conexão com o servidor do Firebase
-            db.ref('.info/connected').on('value', (snap) => {
-                updateSyncStatusUI(snap.val() === true ? 'online' : 'offline');
-            });
-
-            // Sincroniza a lista de clientes em tempo real (qualquer dispositivo conectado recebe as mudanças)
-            db.ref('clients').on('value', (snapshot) => {
-                const cloudData = snapshot.val();
+            // Clientes
+            _sseClients = _sseOn('clients', function(cloudData) {
+                updateSyncStatusUI('online');
                 if (cloudData) {
-                    const cloudClients = Array.isArray(cloudData) ? cloudData : Object.values(cloudData);
+                    var cloudClients = Array.isArray(cloudData) ? cloudData : Object.values(cloudData);
                     clients = checkMonthlyReset(cloudClients);
                 } else if (clients.length > 0) {
-                    // Banco na nuvem ainda vazio: envia os dados locais para criar a base lá
-                    db.ref('clients').set(clients);
+                    fbSet(_fbPath + '/clients', clients);
                 }
                 localStorage.setItem('clients', JSON.stringify(clients));
                 updateClientDisplay();
-            }, (error) => {
-                console.error('Erro ao sincronizar clientes:', error);
-                addLog('Erro ao sincronizar clientes com a nuvem: ' + error.message, 'error');
+            }, function(err) {
+                addLog('Erro ao sincronizar clientes com a nuvem', 'error');
             });
 
-            // Sincroniza o log de atividades em tempo real
-            db.ref('logs').on('value', (snapshot) => {
-                const cloudData = snapshot.val();
+            // Logs
+            _sseLogs = _sseOn('logs', function(cloudData) {
                 if (cloudData) {
                     logs = Array.isArray(cloudData) ? cloudData : Object.values(cloudData);
                     localStorage.setItem('logs', JSON.stringify(logs));
                     updateLogDisplay();
                 } else if (logs.length > 0) {
-                    db.ref('logs').set(logs);
+                    fbSet(_fbPath + '/logs', logs);
                 }
-            }, (error) => {
-                console.error('Erro ao sincronizar logs:', error);
             });
 
-            // Sincroniza a configuração de envio automático
-            db.ref('settings/autoSendEnabled').on('value', (snapshot) => {
-                const cloudValue = snapshot.val();
-                if (cloudValue !== null) {
+            // Envio automático
+            _sseSettings = _sseOn('settings/autoSendEnabled', function(cloudValue) {
+                if (cloudValue !== null && cloudValue !== undefined) {
                     autoSendEnabled = cloudValue;
                     document.getElementById('autoSendToggle').checked = autoSendEnabled;
                     localStorage.setItem('autoSendEnabled', JSON.stringify(autoSendEnabled));
                     updateAutoSendUI();
                 } else if (autoSendEnabled) {
-                    db.ref('settings/autoSendEnabled').set(autoSendEnabled);
+                    fbSet(_fbPath + '/settings/autoSendEnabled', autoSendEnabled);
                 }
-            }, (error) => {
-                console.error('Erro ao sincronizar configurações:', error);
+            });
+
+            // Sobe dados locais se a nuvem estiver vazia (primeira conexão)
+            fbGet(_fbPath + '/clients').then(function(cloudData) {
+                if (!cloudData && clients.length > 0) {
+                    fbSet(_fbPath + '/clients', clients);
+                    addLog('Dados locais enviados para a nuvem', 'success');
+                }
             });
         }
 
+        // Substitui os db.ref() antigos por chamadas REST
+        var db = { // compatível com código legado
+            ref: function(path) {
+                // extrai subpath depois do basePath
+                var subPath = path.replace('cobrancazap/' + ((getActiveDatabaseConfig() || {}).storeId || 'default') + '/', '');
+                return {
+                    set: function(data) { if (firebaseReady) fbSet(_fbPath + '/' + subPath, data); },
+                    remove: function() { if (firebaseReady) fbRemove(_fbPath + '/' + subPath); },
+                    on: function() {},
+                    off: function() {}
+                };
+            }
+        };
+
         // ===================== GERENCIAMENTO DE BANCOS (MODAL) =====================
-        function openDbModal() {
+        function genDbCode() {
+            var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+            var code = '';
+            for (var i = 0; i < 10; i++) code += chars[Math.floor(Math.random() * chars.length)];
+            return code;
+        }
+
+        function exportCloudConfig() {
+            var databases = loadSavedDatabases();
+            if (databases.length === 0) {
+                alert('Nenhum banco cadastrado para exportar.');
+                return;
+            }
+            var blob = new Blob([JSON.stringify(databases, null, 2)], { type: 'application/json' });
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'cobrancazap_config.json';
+            a.click();
+            addLog('Configuração exportada com sucesso', 'success');
+        }
+
+        function importCloudConfig(event) {
+            var file = event.target.files[0];
+            if (!file) return;
+            var reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    var imported = JSON.parse(e.target.result);
+                    if (!Array.isArray(imported)) imported = [imported];
+                    var existing = loadSavedDatabases();
+                    imported.forEach(function(item) {
+                        if (!existing.find(function(d) { return d.id === item.id; })) {
+                            existing.push(item);
+                        }
+                    });
+                    saveDatabasesList(existing);
+                    renderDbList();
+                    addLog(imported.length + ' banco(s) importado(s) com sucesso', 'success');
+                } catch(err) {
+                    alert('Erro ao importar: arquivo inválido.');
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = '';
+        }
+
+        function disconnectActiveDatabase() {
+            if (!confirm('Desconectar o banco ativo? Os dados locais serão mantidos.')) return;
+            localStorage.removeItem('activeFirebaseDatabaseId');
+            _closeSSE();
+            firebaseReady = false;
+            _fbUrl = null;
+            _fbPath = null;
+            updateSyncStatusUI('not-configured');
+            renderDbList();
+            addLog('Banco desconectado', 'info');
+        }
+
+                function openDbModal() {
             renderDbList();
             document.getElementById('dbModal').style.display = 'block';
         }
@@ -1105,7 +1202,8 @@
                         <div style="font-weight:600;">
                             ${item.name} ${item.id === activeId ? '<span class="badge badge-success">Ativo</span>' : ''}
                         </div>
-                        <div style="font-size:0.8rem; color:#6b7280;">${item.projectId || item.databaseURL}</div>
+                        <div style="font-size:0.8rem; color:#6b7280;">${item.databaseURL}</div>
+                        <div style="font-size:0.75rem; color:#9ca3af;">Código: ${item.storeId || 'default'}</div>
                     </div>
                     <div style="display:flex; gap:5px; flex-wrap: wrap;">
                         ${item.id !== activeId ? `<button type="button" class="btn btn-success btn-sm" onclick="setActiveDatabase('${item.id}')"><i data-lucide="check"></i> Usar</button>` : ''}
@@ -1122,13 +1220,8 @@
             if (!item) return;
             document.getElementById('dbEditId').value = item.id;
             document.getElementById('dbName').value = item.name || '';
-            document.getElementById('dbApiKey').value = item.apiKey || '';
-            document.getElementById('dbAuthDomain').value = item.authDomain || '';
-            document.getElementById('dbDatabaseURL').value = item.databaseURL || '';
-            document.getElementById('dbProjectId').value = item.projectId || '';
-            document.getElementById('dbStorageBucket').value = item.storageBucket || '';
-            document.getElementById('dbMessagingSenderId').value = item.messagingSenderId || '';
-            document.getElementById('dbAppId').value = item.appId || '';
+            document.getElementById('dbUrl').value = item.databaseURL || '';
+            document.getElementById('dbStoreId').value = item.storeId || '';
         }
 
         function deleteDatabaseEntry(id) {
@@ -1163,9 +1256,9 @@
             localStorage.setItem('autoSendEnabled', JSON.stringify(autoSendEnabled));
 
             if (firebaseReady) {
-                db.ref('clients').set(clients);
-                db.ref('logs').set(logs);
-                db.ref('settings/autoSendEnabled').set(autoSendEnabled);
+                fbSet(_fbPath + '/clients', clients);
+                fbSet(_fbPath + '/logs', logs);
+                fbSet(_fbPath + '/settings/autoSendEnabled', autoSendEnabled);
             }
         }
 
@@ -1190,9 +1283,9 @@
 
                     // Clear cloud database (Firebase)
                     if (firebaseReady) {
-                        db.ref('clients').remove();
-                        db.ref('logs').remove();
-                        db.ref('settings').remove();
+                        fbRemove(_fbPath + '/clients');
+                        fbRemove(_fbPath + '/logs');
+                        fbRemove(_fbPath + '/settings');
                     }
                     
                     // Update UI
@@ -1738,17 +1831,12 @@
             // Database form (add/edit)
             document.getElementById('dbForm').addEventListener('submit', function(e) {
                 e.preventDefault();
-                const editId = document.getElementById('dbEditId').value;
-                const entry = {
+                var editId = document.getElementById('dbEditId').value;
+                var entry = {
                     id: editId || Date.now().toString(),
                     name: document.getElementById('dbName').value,
-                    apiKey: document.getElementById('dbApiKey').value,
-                    authDomain: document.getElementById('dbAuthDomain').value,
-                    databaseURL: document.getElementById('dbDatabaseURL').value,
-                    projectId: document.getElementById('dbProjectId').value,
-                    storageBucket: document.getElementById('dbStorageBucket').value,
-                    messagingSenderId: document.getElementById('dbMessagingSenderId').value,
-                    appId: document.getElementById('dbAppId').value
+                    databaseURL: document.getElementById('dbUrl').value,
+                    storeId: document.getElementById('dbStoreId').value
                 };
 
                 let databases = loadSavedDatabases();
