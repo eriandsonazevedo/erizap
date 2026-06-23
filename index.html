@@ -454,6 +454,10 @@
                     <i data-lucide="dollar-sign"></i>
                     <div>Cobranças</div>
                 </div>
+                <div class="stat-item" id="syncStatus" title="Clique para gerenciar os bancos de dados em nuvem (Firebase)" style="cursor: pointer;" onclick="openDbModal()">
+                    <i data-lucide="cloud" id="syncIcon"></i>
+                    <div id="syncStatusText">Iniciando...</div>
+                </div>
             </div>
         </div>
     </header>
@@ -687,7 +691,138 @@
         </div>
     </div>
 
+    <!-- Database Management Modal -->
+    <div id="dbModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <i data-lucide="cloud"></i>
+                <h2>Bancos de Dados em Nuvem</h2>
+                <span class="close">&times;</span>
+            </div>
+            <div class="modal-body">
+                <div style="margin-bottom: 20px; padding: 15px; background: rgba(219, 234, 254, 0.7); border-radius: 8px; border: 1px solid #93c5fd;">
+                    <p style="font-size: 0.9rem; color: #1e40af; line-height: 1.6;">
+                        <strong>1.</strong> Crie um projeto grátis em console.firebase.google.com (sem cartão).<br>
+                        <strong>2.</strong> No menu, vá em <strong>Realtime Database → Criar banco de dados</strong> (modo teste).<br>
+                        <strong>3.</strong> Copie a <strong>Database URL</strong> mostrada no topo da página e cole no formulário abaixo.<br>
+                        <strong>4.</strong> Na aba <strong>Regras</strong>, cole e publique:
+                    </p>
+                    <pre style="background:#1e293b; color:#e2e8f0; padding:10px; border-radius:6px; font-size:0.75rem; margin-top:8px; overflow-x:auto;">{
+  "rules": {
+    "cobrancazap": {
+      "$codigo": {
+        ".read": true,
+        ".write": true
+      }
+    }
+  }
+}</pre>
+                </div>
+
+                <div style="display:flex; gap:10px; margin-bottom: 20px; flex-wrap: wrap;">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="exportCloudConfig()">
+                        <i data-lucide="download"></i> Exportar Configuração
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('importDbConfigFile').click()">
+                        <i data-lucide="upload"></i> Importar Configuração
+                    </button>
+                    <button type="button" class="btn btn-danger btn-sm" onclick="disconnectActiveDatabase()">
+                        <i data-lucide="log-out"></i> Desconectar Banco Atual
+                    </button>
+                    <input type="file" id="importDbConfigFile" accept=".json" style="display:none" onchange="importCloudConfig(event)">
+                </div>
+
+                <div id="dbList"></div>
+
+                <h3 style="margin: 20px 0 15px; color: #374151; font-size: 1rem;">Adicionar / Editar Banco</h3>
+                <form id="dbForm" class="form-grid">
+                    <input type="hidden" id="dbEditId">
+
+                    <div class="form-group">
+                        <label for="dbName">Nome do Banco (apelido, ex: "Banco Principal")</label>
+                        <input type="text" id="dbName" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="dbUrl">Database URL</label>
+                        <input type="text" id="dbUrl" placeholder="https://seu-projeto-default-rtdb.firebaseio.com" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="dbStoreId">Código de Acesso (use o mesmo código em todos os aparelhos)</label>
+                        <div style="display:flex; gap:8px;">
+                            <input type="text" id="dbStoreId" maxlength="20" placeholder="Ex: COBRANCA2024"
+                                oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')" required style="flex:1;">
+                            <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('dbStoreId').value=genDbCode()" style="flex-shrink:0;">
+                                🎲 Gerar
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="modal-footer">
+                        <button type="submit" class="btn btn-primary" style="flex: 1;">
+                            <i data-lucide="save"></i> Salvar Banco
+                        </button>
+                        <button type="button" class="btn btn-secondary" id="cancelDbEdit" style="flex: 1;">
+                            Limpar Formulário
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Cloud Conflict Choice Modal -->
+    <div id="cloudChoiceModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <i data-lucide="cloud"></i>
+                <h2>Dados Encontrados na Nuvem</h2>
+            </div>
+            <div class="modal-body">
+                <p id="cloudChoiceMsg" style="color: #374151; margin-bottom: 20px; line-height: 1.6;"></p>
+                <div style="display:flex; flex-direction:column; gap:10px;">
+                    <button type="button" class="btn btn-primary btn-sm" style="width:100%; justify-content:center;" onclick="resolveCloudChoice('cloud')">
+                        <i data-lucide="cloud"></i> Usar Dados da Nuvem
+                    </button>
+                    <button type="button" class="btn btn-secondary btn-sm" style="width:100%; justify-content:center;" onclick="resolveCloudChoice('local')">
+                        <i data-lucide="smartphone"></i> Enviar Dados Deste Aparelho
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>
+        // ===================== BANCOS DE DADOS (FIREBASE) =====================
+        // As credenciais de cada banco NÃO ficam mais fixas no código-fonte (então
+        // não vão expostas se você publicar esse arquivo no GitHub). Em vez disso,
+        // elas são cadastradas pela própria interface (clique no ícone de nuvem no
+        // topo da página) e ficam guardadas no localStorage deste navegador/dispositivo.
+        // Você pode cadastrar vários bancos (um por cliente/empresa, por exemplo) e
+        // trocar entre eles quando quiser, sem precisar editar o arquivo.
+        let db = null;
+        let firebaseReady = false;
+
+        function loadSavedDatabases() {
+            try {
+                return JSON.parse(localStorage.getItem('firebaseDatabases')) || [];
+            } catch (error) {
+                return [];
+            }
+        }
+
+        function saveDatabasesList(list) {
+            localStorage.setItem('firebaseDatabases', JSON.stringify(list));
+        }
+
+        function getActiveDatabaseConfig() {
+            const activeId = localStorage.getItem('activeFirebaseDatabaseId');
+            if (!activeId) return null;
+            return loadSavedDatabases().find(d => d.id === activeId) || null;
+        }
+        // ========================================================================
+
         // Global variables
         let clients = [];
         let logs = [];
@@ -733,6 +868,11 @@
                 localStorage.setItem('lastResetMonth', currentMonthKey);
                 
                 addLog(`Reset automático mensal executado - todos os clientes resetados para o mês ${currentMonth + 1}/${currentYear}`, 'info');
+                
+                // Propaga o reset para a nuvem também, para refletir em todos os dispositivos
+                if (firebaseReady) {
+                    db.ref('clients').set(resetClients);
+                }
                 
                 return resetClients;
             }
@@ -802,13 +942,231 @@
                 document.getElementById('autoSendToggle').checked = autoSendEnabled;
                 updateAutoSendUI();
             }
+
+            // Conecta ao banco de dados em nuvem ativo (se houver algum cadastrado) e mantém tudo sincronizado
+            reconnectFirebase();
         }
 
-        // Save data to localStorage
+        // Atualiza o indicador visual de status da sincronização (cabeçalho)
+        function updateSyncStatusUI(status) {
+            const icon = document.getElementById('syncIcon');
+            const text = document.getElementById('syncStatusText');
+            if (!icon || !text) return;
+
+            const states = {
+                'not-configured': { label: 'Modo Local', color: '#fde68a', name: 'cloud-off' },
+                'connecting': { label: 'Conectando...', color: '#e5e7eb', name: 'cloud' },
+                'online': { label: 'Sincronizado', color: '#86efac', name: 'cloud' },
+                'offline': { label: 'Sem conexão', color: '#fca5a5', name: 'cloud-off' }
+            };
+            const s = states[status] || states['connecting'];
+            text.textContent = s.label;
+            icon.setAttribute('data-lucide', s.name);
+            icon.style.color = s.color;
+            lucide.createIcons();
+        }
+
+        // Conecta ao Firebase ativo e mantém tudo sincronizado em tempo real
+        async function reconnectFirebase() {
+            // Desliga os listeners do banco anterior, se houver algum conectado
+            if (db) {
+                try {
+                    db.ref('clients').off();
+                    db.ref('logs').off();
+                    db.ref('settings/autoSendEnabled').off();
+                    db.ref('.info/connected').off();
+                } catch (error) {
+                    console.error('Erro ao desconectar listeners antigos:', error);
+                }
+            }
+
+            // Remove a instância de app anterior do Firebase antes de criar outra
+            if (typeof firebase !== 'undefined' && firebase.apps && firebase.apps.length) {
+                try {
+                    await firebase.app().delete();
+                } catch (error) {
+                    console.error('Erro ao remover instância anterior do Firebase:', error);
+                }
+            }
+
+            db = null;
+            firebaseReady = false;
+
+            const activeConfig = getActiveDatabaseConfig();
+
+            if (!activeConfig) {
+                updateSyncStatusUI('not-configured');
+                return;
+            }
+
+            try {
+                firebase.initializeApp({
+                    apiKey: activeConfig.apiKey,
+                    authDomain: activeConfig.authDomain,
+                    databaseURL: activeConfig.databaseURL,
+                    projectId: activeConfig.projectId,
+                    storageBucket: activeConfig.storageBucket,
+                    messagingSenderId: activeConfig.messagingSenderId,
+                    appId: activeConfig.appId
+                });
+                db = firebase.database();
+                firebaseReady = true;
+                attachCloudListeners();
+            } catch (error) {
+                console.error('Erro ao conectar ao Firebase:', error);
+                db = null;
+                firebaseReady = false;
+                updateSyncStatusUI('offline');
+                addLog(`Erro ao conectar ao banco "${activeConfig.name}": ${error.message}`, 'error');
+            }
+        }
+
+        // Liga os listeners em tempo real do banco atualmente conectado
+        function attachCloudListeners() {
+            updateSyncStatusUI('connecting');
+
+            // Monitora o status real da conexão com o servidor do Firebase
+            db.ref('.info/connected').on('value', (snap) => {
+                updateSyncStatusUI(snap.val() === true ? 'online' : 'offline');
+            });
+
+            // Sincroniza a lista de clientes em tempo real (qualquer dispositivo conectado recebe as mudanças)
+            db.ref('clients').on('value', (snapshot) => {
+                const cloudData = snapshot.val();
+                if (cloudData) {
+                    const cloudClients = Array.isArray(cloudData) ? cloudData : Object.values(cloudData);
+                    clients = checkMonthlyReset(cloudClients);
+                } else if (clients.length > 0) {
+                    // Banco na nuvem ainda vazio: envia os dados locais para criar a base lá
+                    db.ref('clients').set(clients);
+                }
+                localStorage.setItem('clients', JSON.stringify(clients));
+                updateClientDisplay();
+            }, (error) => {
+                console.error('Erro ao sincronizar clientes:', error);
+                addLog('Erro ao sincronizar clientes com a nuvem: ' + error.message, 'error');
+            });
+
+            // Sincroniza o log de atividades em tempo real
+            db.ref('logs').on('value', (snapshot) => {
+                const cloudData = snapshot.val();
+                if (cloudData) {
+                    logs = Array.isArray(cloudData) ? cloudData : Object.values(cloudData);
+                    localStorage.setItem('logs', JSON.stringify(logs));
+                    updateLogDisplay();
+                } else if (logs.length > 0) {
+                    db.ref('logs').set(logs);
+                }
+            }, (error) => {
+                console.error('Erro ao sincronizar logs:', error);
+            });
+
+            // Sincroniza a configuração de envio automático
+            db.ref('settings/autoSendEnabled').on('value', (snapshot) => {
+                const cloudValue = snapshot.val();
+                if (cloudValue !== null) {
+                    autoSendEnabled = cloudValue;
+                    document.getElementById('autoSendToggle').checked = autoSendEnabled;
+                    localStorage.setItem('autoSendEnabled', JSON.stringify(autoSendEnabled));
+                    updateAutoSendUI();
+                } else if (autoSendEnabled) {
+                    db.ref('settings/autoSendEnabled').set(autoSendEnabled);
+                }
+            }, (error) => {
+                console.error('Erro ao sincronizar configurações:', error);
+            });
+        }
+
+        // ===================== GERENCIAMENTO DE BANCOS (MODAL) =====================
+        function openDbModal() {
+            renderDbList();
+            document.getElementById('dbModal').style.display = 'block';
+        }
+
+        function closeDbModal() {
+            document.getElementById('dbModal').style.display = 'none';
+            document.getElementById('dbForm').reset();
+            document.getElementById('dbEditId').value = '';
+        }
+
+        function renderDbList() {
+            const databases = loadSavedDatabases();
+            const activeId = localStorage.getItem('activeFirebaseDatabaseId');
+            const container = document.getElementById('dbList');
+
+            if (databases.length === 0) {
+                container.innerHTML = '<p style="color:#6b7280; margin-bottom: 15px;">Nenhum banco cadastrado ainda. Adicione um banco usando o formulário abaixo.</p>';
+                return;
+            }
+
+            container.innerHTML = databases.map(item => `
+                <div style="display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px; margin-bottom:8px; border:2px solid ${item.id === activeId ? '#16a34a' : '#e5e7eb'}; border-radius:8px;">
+                    <div>
+                        <div style="font-weight:600;">
+                            ${item.name} ${item.id === activeId ? '<span class="badge badge-success">Ativo</span>' : ''}
+                        </div>
+                        <div style="font-size:0.8rem; color:#6b7280;">${item.projectId || item.databaseURL}</div>
+                    </div>
+                    <div style="display:flex; gap:5px; flex-wrap: wrap;">
+                        ${item.id !== activeId ? `<button type="button" class="btn btn-success btn-sm" onclick="setActiveDatabase('${item.id}')"><i data-lucide="check"></i> Usar</button>` : ''}
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="editDatabaseEntry('${item.id}')"><i data-lucide="edit"></i></button>
+                        <button type="button" class="btn btn-danger btn-sm" onclick="deleteDatabaseEntry('${item.id}')"><i data-lucide="trash-2"></i></button>
+                    </div>
+                </div>
+            `).join('');
+            lucide.createIcons();
+        }
+
+        function editDatabaseEntry(id) {
+            const item = loadSavedDatabases().find(d => d.id === id);
+            if (!item) return;
+            document.getElementById('dbEditId').value = item.id;
+            document.getElementById('dbName').value = item.name || '';
+            document.getElementById('dbApiKey').value = item.apiKey || '';
+            document.getElementById('dbAuthDomain').value = item.authDomain || '';
+            document.getElementById('dbDatabaseURL').value = item.databaseURL || '';
+            document.getElementById('dbProjectId').value = item.projectId || '';
+            document.getElementById('dbStorageBucket').value = item.storageBucket || '';
+            document.getElementById('dbMessagingSenderId').value = item.messagingSenderId || '';
+            document.getElementById('dbAppId').value = item.appId || '';
+        }
+
+        function deleteDatabaseEntry(id) {
+            const item = loadSavedDatabases().find(d => d.id === id);
+            if (!item) return;
+            if (!confirm(`Remover o banco "${item.name}" desta lista?\n\n(Isso só remove a conexão salva aqui — os dados continuam intactos no Firebase.)`)) {
+                return;
+            }
+
+            const databases = loadSavedDatabases().filter(d => d.id !== id);
+            saveDatabasesList(databases);
+
+            if (localStorage.getItem('activeFirebaseDatabaseId') === id) {
+                localStorage.removeItem('activeFirebaseDatabaseId');
+                reconnectFirebase();
+            }
+            renderDbList();
+        }
+
+        function setActiveDatabase(id) {
+            localStorage.setItem('activeFirebaseDatabaseId', id);
+            renderDbList();
+            reconnectFirebase();
+            addLog('Banco de dados em nuvem alterado', 'info');
+        }
+        // ==============================================================================
+
+        // Save data to localStorage e ao banco de dados em nuvem (Firebase)
         function saveData() {
             localStorage.setItem('clients', JSON.stringify(clients));
             localStorage.setItem('logs', JSON.stringify(logs));
             localStorage.setItem('autoSendEnabled', JSON.stringify(autoSendEnabled));
+
+            if (firebaseReady) {
+                db.ref('clients').set(clients);
+                db.ref('logs').set(logs);
+                db.ref('settings/autoSendEnabled').set(autoSendEnabled);
+            }
         }
 
         // Clear all database
@@ -829,6 +1187,13 @@
                     localStorage.removeItem('logs');
                     localStorage.removeItem('autoSendEnabled');
                     localStorage.removeItem('lastResetMonth');
+
+                    // Clear cloud database (Firebase)
+                    if (firebaseReady) {
+                        db.ref('clients').remove();
+                        db.ref('logs').remove();
+                        db.ref('settings').remove();
+                    }
                     
                     // Update UI
                     document.getElementById('autoSendToggle').checked = false;
@@ -875,9 +1240,10 @@
         // Update client display
         function updateClientDisplay() {
             const today = new Date().getDate();
-            const filteredClients = filterToday 
+            const filteredClients = (filterToday 
                 ? clients.filter(client => client.due_date <= today && !client.payment_confirmed)
-                : clients;
+                : clients
+            ).slice().sort((a, b) => a.due_date - b.due_date || a.name.localeCompare(b.name));
 
             const clientCount = document.getElementById('clientCount');
             const tableBody = document.getElementById('clientsTableBody');
@@ -1369,12 +1735,67 @@
                 }
             });
 
-            // Modal close
-            document.querySelector('.close').addEventListener('click', closeEditModal);
-            window.addEventListener('click', function(e) {
-                if (e.target === document.getElementById('editModal')) {
-                    closeEditModal();
+            // Database form (add/edit)
+            document.getElementById('dbForm').addEventListener('submit', function(e) {
+                e.preventDefault();
+                const editId = document.getElementById('dbEditId').value;
+                const entry = {
+                    id: editId || Date.now().toString(),
+                    name: document.getElementById('dbName').value,
+                    apiKey: document.getElementById('dbApiKey').value,
+                    authDomain: document.getElementById('dbAuthDomain').value,
+                    databaseURL: document.getElementById('dbDatabaseURL').value,
+                    projectId: document.getElementById('dbProjectId').value,
+                    storageBucket: document.getElementById('dbStorageBucket').value,
+                    messagingSenderId: document.getElementById('dbMessagingSenderId').value,
+                    appId: document.getElementById('dbAppId').value
+                };
+
+                let databases = loadSavedDatabases();
+                const wasActive = localStorage.getItem('activeFirebaseDatabaseId') === editId;
+
+                if (editId) {
+                    databases = databases.map(d => d.id === editId ? entry : d);
+                } else {
+                    databases.push(entry);
                 }
+                saveDatabasesList(databases);
+
+                e.target.reset();
+                document.getElementById('dbEditId').value = '';
+
+                const activeId = localStorage.getItem('activeFirebaseDatabaseId');
+                if (!activeId) {
+                    // Nenhum banco ativo ainda: usa este automaticamente
+                    setActiveDatabase(entry.id);
+                } else if (wasActive) {
+                    // Editou o banco que já estava em uso: reconecta com os dados atualizados
+                    renderDbList();
+                    reconnectFirebase();
+                } else {
+                    renderDbList();
+                }
+
+                addLog(`Banco "${entry.name}" salvo com sucesso`, 'success');
+            });
+
+            document.getElementById('cancelDbEdit').addEventListener('click', function() {
+                document.getElementById('dbForm').reset();
+                document.getElementById('dbEditId').value = '';
+            });
+
+            // Modal close (funciona para qualquer modal da página)
+            document.querySelectorAll('.modal .close').forEach(function(closeBtn) {
+                closeBtn.addEventListener('click', function() {
+                    closeBtn.closest('.modal').style.display = 'none';
+                });
+            });
+            window.addEventListener('click', function(e) {
+                document.querySelectorAll('.modal').forEach(function(modal) {
+                    if (e.target === modal) {
+                        modal.style.display = 'none';
+                    }
+                });
             });
 
             console.log('✅ Aplicação carregada com sucesso!');
